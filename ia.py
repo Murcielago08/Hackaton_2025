@@ -42,25 +42,32 @@ class EPIDetectionSystem:
             print(f"⚠ Impossible de se connecter à Ollama sur {ollama_url}")
             print("  Assurez-vous qu'Ollama est lancé: ollama serve")
         
-        # Classes d'EPI à détecter
+        # Classes d'EPI à détecter (restreintes)
         self.epi_classes = [
             'casque', 'gilet_haute_visibilite', 'lunettes_protection',
-            'gants', 'chaussures_securite', 'masque', 'harnais',
-            'bouchons_oreilles', 'personne'
+            'gants', 'bouchons_oreilles', 'chaussures_securite',
+            'masque', 'visiere_protection', 'personne'
         ]
 
-        # mapping des labels habituels vers les classes EPI (minuscules)
+        # mapping réduit des labels habituels vers les classes EPI pertinentes
         self.label_to_epi = {
-            'helmet': 'casque', 'hard hat': 'casque', 'hardhat': 'casque', 'safety helmet': 'casque', 'construction helmet': 'casque',
-            'construction hat': 'casque', 'safety hardhat': 'casque',
-            'safety vest': 'gilet_haute_visibilite', 'vest': 'gilet_haute_visibilite', 'high visibility vest': 'gilet_haute_visibilite',
-            'yellow vest': 'gilet_haute_visibilite', 'reflective vest': 'gilet_haute_visibilite',
+            # casque
+            'helmet': 'casque', 'hard hat': 'casque', 'hardhat': 'casque', 'safety helmet': 'casque',
+            # gilet haute visibilité
+            'safety vest': 'gilet_haute_visibilite', 'vest': 'gilet_haute_visibilite', 'high visibility vest': 'gilet_haute_visibilite', 'yellow vest': 'gilet_haute_visibilite', 'reflective vest': 'gilet_haute_visibilite',
+            # gants
             'glove': 'gants', 'gloves': 'gants', 'safety glove': 'gants', 'work glove': 'gants',
+            # lunettes / protections oculaires
             'safety glasses': 'lunettes_protection', 'goggles': 'lunettes_protection', 'sunglasses': 'lunettes_protection',
-            'mask': 'masque', 'respirator': 'masque',
-            'shoe': 'chaussures_securite', 'boot': 'chaussures_securite', 'safety shoe': 'chaussures_securite', 'work boot': 'chaussures_securite',
-            'harness': 'harnais',
-            'earplug': 'bouchons_oreilles', 'ear plugs': 'bouchons_oreilles',
+            # bouchons / protections auditives
+            'earplug': 'bouchons_oreilles', 'ear plugs': 'bouchons_oreilles', 'ear protector': 'bouchons_oreilles',
+            # bottes / chaussures de sécurité
+            'boot': 'chaussures_securite', 'boots': 'chaussures_securite', 'shoe': 'chaussures_securite', 'shoes': 'chaussures_securite', 'bottes': 'chaussures_securite',
+            # masque / respirateur
+            'mask': 'masque', 'face mask': 'masque', 'respirator': 'masque', 'masque': 'masque',
+            # visière / face shield
+            'visor': 'visiere_protection', 'face shield': 'visiere_protection', 'visiere': 'visiere_protection', 'visière': 'visiere_protection', 'face-shield': 'visiere_protection',
+            # personne (utile pour heuristiques)
             'person': 'personne', 'personne': 'personne'
         }
         
@@ -179,30 +186,6 @@ class EPIDetectionSystem:
                 best_box = box
         return (best_ratio >= side_thresh), best_ratio, best_box
 
-    def _detect_boots_on_person(self, image: np.ndarray, bbox: List[int], foot_thresh: float = 0.04) -> Tuple[bool, float, List[int]]:
-        """
-        Heuristique bottes : analyse la zone basse du bbox (bottom 15-25%), mesure pixels non-skin/différents et edges.
-        Retourne (détecté_bool, ratio, bbox_det).
-        """
-        h, w = image.shape[:2]
-        x1, y1, x2, y2 = bbox
-        x1, y1, x2, y2 = max(0,x1), max(0,y1), min(w-1,x2), min(h-1,y2)
-        if x2 <= x1 or y2 <= y1:
-            return False, 0.0, []
-        height = y2 - y1
-        foot_y1 = int(y2 - 0.25*height); foot_y2 = y2
-        crop = image[foot_y1:foot_y2, x1:x2]
-        if crop.size == 0:
-            return False, 0.0, []
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        edge_ratio = float(np.count_nonzero(edges)) / (edges.size + 1e-8)
-        # complément couleur : détecter pixels sombre (boots souvent foncées) ou couleur contrastée
-        v = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)[:,:,2]
-        dark_ratio = float(np.count_nonzero(v < 80)) / (v.size + 1e-8)
-        score = 0.6*edge_ratio + 0.4*dark_ratio
-        return (score >= foot_thresh), score, [x1, foot_y1, x2, foot_y2]
-
     def detect_epi(self, image_path: str, conf_threshold: float = 0.5) -> Tuple[np.ndarray, List[Dict]]:
         """
         Détecte les EPI sur une image. Accepté: chemin ou numpy array (si besoin).
@@ -227,6 +210,8 @@ class EPIDetectionSystem:
         
         # Extraire détections d'une manière robuste (gère différentes versions ultralytics)
         detections: List[Dict] = []
+        allowed_set = set(self.epi_classes)  # filtre strict
+        
         try:
             # results peut être itérable ; on prend le premier résultat si nécessaire
             first = results[0] if len(results) > 0 else results
@@ -239,6 +224,20 @@ class EPIDetectionSystem:
                 confs_array = confs.cpu().numpy() if confs is not None and hasattr(confs, 'cpu') else (np.array(confs) if confs is not None else np.ones((xyxy_array.shape[0],)))
                 cls_array = cls_probs.cpu().numpy() if cls_probs is not None and hasattr(cls_probs, 'cpu') else (np.array(cls_probs) if cls_probs is not None else np.zeros((xyxy_array.shape[0],)))
                 names = getattr(first, 'names', {})
+                # essayer de récupérer des masques (pour affiner les bbox) - format variable selon ultralytics
+                masks_data = None
+                masks_attr = getattr(first, 'masks', None)
+                if masks_attr is not None:
+                    # plusieurs formes possibles : masks.data (tensor), masks (list/np)
+                    try:
+                        maybe = getattr(masks_attr, 'data', masks_attr)
+                        # tenter cpu->numpy si tensor
+                        if hasattr(maybe, 'cpu'):
+                            masks_data = maybe.cpu().numpy()
+                        else:
+                            masks_data = np.array(maybe)
+                    except Exception:
+                        masks_data = None
                 for i, box in enumerate(xyxy_array):
                     x1, y1, x2, y2 = map(int, box.tolist())
                     conf = float(confs_array[i])
@@ -246,13 +245,32 @@ class EPIDetectionSystem:
                     class_name = names.get(cls, str(cls))
                     if conf < conf_threshold:
                         continue
+                    # raffinement: si masque disponible, calculer bbox serrée depuis le masque i
+                    if masks_data is not None and i < len(masks_data):
+                        try:
+                            mask_i = masks_data[i]
+                            # mask peut être bool/0-1 ou float ; s'assurer binaire
+                            mask_bin = (mask_i > 0.5).astype(np.uint8)
+                            ys, xs = np.where(mask_bin)
+                            if ys.size > 0 and xs.size > 0:
+                                x1m, x2m = int(xs.min()), int(xs.max())
+                                y1m, y2m = int(ys.min()), int(ys.max())
+                                # clamp to image
+                                h_img, w_img = image.shape[:2]
+                                x1, y1 = max(0, x1m), max(0, y1m)
+                                x2, y2 = min(w_img-1, x2m), min(h_img-1, y2m)
+                        except Exception:
+                            # fallback : conserver bbox initiale
+                            pass
                     mapped = self.map_label_to_epi(class_name)
-                    detections.append({
-                        'class': class_name,           # label original
-                        'epi_class': mapped,          # classe EPI normalisée (ou label lowercase)
-                        'confidence': conf,
-                        'bbox': [x1, y1, x2, y2]
-                    })
+                    # n'ajouter QUE si mappé vers une classe autorisée (ou 'personne')
+                    if mapped in allowed_set:
+                        detections.append({
+                            'class': class_name,
+                            'epi_class': mapped,
+                            'confidence': conf,
+                            'bbox': [x1, y1, x2, y2]
+                        })
             else:
                 # Fallback : tenter d'extraire à partir des attributs des boxes un par un
                 for res in results:
@@ -261,19 +279,20 @@ class EPIDetectionSystem:
                     for b in res.boxes:
                         try:
                             xy = b.xyxy[0].cpu().numpy() if hasattr(b.xyxy, 'cpu') else np.array(b.xyxy[0])
-                            conf = float(b.conf[0]) if hasattr(b, 'conf') else float(b.conf)
-                            cls = int(b.cls[0]) if hasattr(b, 'cls') else int(b.cls)
+                            conf = float(b.conf[0]) if hasattr(b.conf) else float(b.conf)
+                            cls = int(b.cls[0]) if hasattr(b.cls) else int(b.cls)
                             class_name = res.names.get(cls, str(cls))
                             if conf < conf_threshold:
                                 continue
                             x1, y1, x2, y2 = map(int, xy.tolist())
                             mapped = self.map_label_to_epi(class_name)
-                            detections.append({
-                                'class': class_name,           # label original
-                                'epi_class': mapped,          # classe EPI normalisée (ou label lowercase)
-                                'confidence': conf,
-                                'bbox': [x1, y1, x2, y2]
-                            })
+                            if mapped in allowed_set:
+                                detections.append({
+                                    'class': class_name,
+                                    'epi_class': mapped,
+                                    'confidence': conf,
+                                    'bbox': [x1, y1, x2, y2]
+                                })
                         except Exception:
                             continue
         except Exception as e:
@@ -284,10 +303,9 @@ class EPIDetectionSystem:
         # on parcourt les personnes et on ajoute détection gilet si couleur trouvée
         persons = [d for d in detections if d.get('epi_class') == 'personne' or d.get('class','').lower() == 'person']
         existing_vests_boxes = [d['bbox'] for d in detections if d.get('epi_class') == 'gilet_haute_visibilite']
-        # also collect existing helmets, gloves, boots to avoid duplicates
+        # also collect existing helmets, gloves to avoid duplicates
         existing_helmets = [d['bbox'] for d in detections if d.get('epi_class') == 'casque']
         existing_gloves = [d['bbox'] for d in detections if d.get('epi_class') == 'gants']
-        existing_boots = [d['bbox'] for d in detections if d.get('epi_class') == 'chaussures_securite']
 
         for p in persons:
             # skip si un gilet existe déjà qui chevauche le bbox de la personne (simple IoU-like)
@@ -353,38 +371,36 @@ class EPIDetectionSystem:
                         'confidence': float(min(0.99, ratio_g*2.0)),
                         'bbox': gbbox
                     })
-            # bottes
-            has_boot = False
-            for bb in existing_boots:
-                bx1, by1, bx2, by2 = bb
-                ix1, iy1 = max(px1, bx1), max(py1, by1)
-                ix2, iy2 = min(px2, bx2), min(py2, by2)
-                if ix2 > ix1 and iy2 > iy1:
-                    has_boot = True
-                    break
-            if not has_boot:
-                detected_b, ratio_b, bbox_b = self._detect_boots_on_person(image, p['bbox'])
-                if detected_b:
-                    bb_box = bbox_b if bbox_b else [px1, int(py2 - 0.2*(py2-py1)), px2, py2]
-                    detections.append({
-                        'class': 'foot_region',
-                        'epi_class': 'chaussures_securite',
-                        'confidence': float(min(0.99, ratio_b*1.5)),
-                        'bbox': bb_box
-                    })
 
-        # Annotation de l'image avec OpenCV (inchangé sauf lecture de 'epi_class')
+        # Annotation de l'image avec OpenCV (inchangé sauf lecture de 'epi_class' et couleurs adaptées)
         annotated = image.copy()
         for det in detections:
             x1, y1, x2, y2 = det['bbox']
             cls_name = det.get('epi_class') or det.get('class')
             conf = det['confidence']
-            color = (0, 200, 0) if ('casque' in cls_name or 'gilet' in cls_name or 'gants' in cls_name or 'chaussures' in cls_name) else (0, 120, 255)
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            # couleur verte pour les EPI autorisés, orange autrement (ne devrait pas arriver)
+            color = (0, 200, 0) if cls_name in {'casque','gilet_haute_visibilite','gants','lunettes_protection','Casque_anti_bruit','chaussures_securite','masque','visiere_protection'} else (0, 120, 255)
+            # rectangle plus précis (coords int)
+            cv2.rectangle(annotated, (int(x1), int(y1)), (int(x2), int(y2)), color, 2, lineType=cv2.LINE_AA)
+            # label plus discret : taille réduite et petit padding
             label = f"{cls_name} {conf:.2f}"
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw, y1), color, -1)
-            cv2.putText(annotated, label, (x1, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1, cv2.LINE_AA)
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.4  # plus petit
+            font_thickness = 1
+            (tw, th), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+            pad = 4
+            lx1 = int(x1)
+            ly1 = int(y1) - th - pad
+            ly2 = int(y1)
+            lx2 = int(x1) + tw + pad
+            if ly1 < 0:
+                # si trop haut, dessiner sous la bbox
+                ly1 = int(y2)
+                ly2 = int(y2 + th + pad)
+            cv2.rectangle(annotated, (lx1, ly1), (lx2, ly2), color, cv2.FILLED, lineType=cv2.LINE_AA)
+            text_x = lx1 + 2
+            text_y = ly2 - 3 if ly2 > ly1 else ly2
+            cv2.putText(annotated, label, (text_x, text_y), font, font_scale, (255,255,255), font_thickness, cv2.LINE_AA)
 
         return annotated, detections
     
@@ -400,25 +416,24 @@ class EPIDetectionSystem:
         """
         epi_detected = {}
         persons_detected = 0
+        allowed_epi = set(self.epi_classes) - {'personne'}
         
         for det in detections:
-            # utiliser la classe EPI normalisée si existante
             class_name = det.get('epi_class', det.get('class'))
-            if class_name == 'personne' or 'person' in class_name.lower():
+            # compter les personnes
+            if class_name == 'personne' or 'person' in str(class_name).lower():
                 persons_detected += 1
-            else:
-                if class_name not in epi_detected:
-                    epi_detected[class_name] = 0
-                epi_detected[class_name] += 1
+                continue
+            # n'incrémenter que si dans la liste autorisée
+            if class_name in allowed_epi:
+                epi_detected[class_name] = epi_detected.get(class_name, 0) + 1
         
-        # Analyse basique
         analysis = {
             'personnes_detectees': persons_detected,
             'epi_detectes': epi_detected,
-            'total_epi': len([d for d in detections if d['class'] != 'personne']),
+            'total_epi': sum(epi_detected.values()),
             'detections_brutes': detections
         }
-        
         return analysis
     
     def encode_image_to_base64(self, image_path: str) -> str:
@@ -473,60 +488,40 @@ class EPIDetectionSystem:
                                      analysis: Dict,
                                      use_vision: bool = True) -> str:
         """
-        Génère une description en langage naturel avec Ollama
-        
-        Args:
-            image_path: Chemin vers l'image
-            detections: Détections YOLO
-            analysis: Analyse de conformité
-            use_vision: Utiliser un modèle vision (llava, llama3.2-vision)
-            
-        Returns:
-            Description en langage naturel
+        Génère une description en langage naturel avec Ollama (modifié pour rapport synthétique)
         """
-        # Préparation du contexte
-        detection_summary = json.dumps(analysis, indent=2, ensure_ascii=False)
-        
+        # Préparation du contexte (JSON compact)
+        detection_summary = json.dumps(analysis, ensure_ascii=False)
+
+        # Prompt strict : une seule phrase en français, rapport synthétique uniquement
+        concise_instruction = (
+            "Tu es un assistant. FOURNIS UNIQUEMENT UNE PHRASE SYNTHÉTIQUE EN FRANÇAIS "
+            "qui RÉSUME le rapport de détection en t'appuyant sur les données fournies. "
+            "Construis la phrase à partir des nombres et types d'EPI détectés; n'utilise pas "
+            "un exemple littéralement ni de texte additionnel. La phrase doit refléter le contenu "
+            "des données (nombre de personnes et EPI par personne si possible)."
+        )
+
+        prompt = f"""{concise_instruction}
+
+Données:
+{detection_summary}
+
+Réponds PAR UNE SEULE PHRASE EN FRANÇAIS, adaptée aux données ci‑dessus (ne répète pas un exemple littéralement)."""
+
         if use_vision:
-            # Utilisation d'un modèle vision local
-            prompt = f"""Tu es un expert en sécurité au travail spécialisé dans l'analyse d'EPI (Équipements de Protection Individuelle).
-
-Analyse cette image de chantier/lieu de travail et les détections automatiques suivantes :
-
-{detection_summary}
-
-Fournis une description professionnelle en français incluant :
-1. Le contexte général de la scène
-2. Les personnes présentes et leur équipement
-3. Les EPI portés (casque, gilet, gants, lunettes, etc.)
-4. Les EPI manquants ou non conformes
-5. Une évaluation globale de la conformité sécurité
-6. Des recommandations si nécessaire
-
-Sois précis, concis et professionnel. Réponds UNIQUEMENT en français."""
-            
             response = self.query_ollama(prompt, image_path)
-        
         else:
-            # Utilisation sans vision (basé uniquement sur les détections)
-            prompt = f"""Tu es un expert en sécurité au travail.
-
-Analyse les détections suivantes d'EPI (Équipements de Protection Individuelle) :
-
-{detection_summary}
-
-Fournis un rapport professionnel en français incluant :
-1. Résumé des personnes et EPI détectés
-2. Évaluation de la conformité sécurité
-3. Points positifs
-4. Points d'amélioration ou EPI manquants
-5. Recommandations
-
-Sois précis et professionnel. Réponds UNIQUEMENT en français."""
-            
             response = self.query_ollama(prompt)
-        
-        return response
+
+        # Nettoyage simple de la réponse
+        if isinstance(response, str):
+            return response.strip()
+        # fallback minimal si format inattendu
+        try:
+            return str(response).strip()
+        except Exception:
+            return "Erreur: réponse LLM inattendue."
     
     def process_image(self, 
                      image_path: str, 
